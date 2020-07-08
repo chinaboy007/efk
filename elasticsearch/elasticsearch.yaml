@@ -1,0 +1,88 @@
+apiVersion: apps/v1
+kind: StatefulSet    
+metadata:
+  name: es   #定义了名为 es 的 StatefulSet 对象
+  namespace: logging
+spec:
+  serviceName: elasticsearch  #和前面创建的 Service 相关联，这可以确保使用以下 DNS 地址访问 StatefulSet 中的每一个 Pod：es-[0,1,2].elasticsearch.logging.svc.cluster.local，其中[0,1,2]对应于已分配的 Pod 序号。
+  replicas: 3  #3个副本
+  selector:    #设置匹配标签为app=elasticsearch
+    matchLabels:
+      app: elasticsearch    
+  template:    #定义Pod模板
+    metadata:
+      labels: 
+        app: elasticsearch
+    spec: 
+      initContainers:  #初始化容器，在主容器执行前运行
+      - name: increase-vm-max-map  #第一个Init容器用来增加操作系统对mmap计数的限制
+        image: busybox  
+        command: ["sysctl", "-w", "vm.max_map_count=262144"]
+        securityContext:
+          privileged: true
+      - name: increase-fd-ulimit   #第二个Init容器用来执行ulimit命令，增加打开文件描述符的最大数量
+        image: busybox
+        command: ["sh", "-c", "ulimit -n 65536"]
+        securityContext:
+          privileged: true
+      containers:   
+      - name: elasticsearch
+        image: docker.elastic.co/elasticsearch/elasticsearch:7.6.2
+        ports:
+        - name: rest
+          containerPort: 9200
+        - name: inter
+          containerPort: 9300
+        resources:
+          limits:
+            cpu: 1000m
+          requests:
+            cpu: 1000m
+        volumeMounts:
+        - name: data
+          mountPath: /usr/share/elasticsearch/data
+        env: #声明变量
+        - name: cluster.name  # #Elasticsearch 集群的名称
+          value: k8s-logs  
+        - name: node.name #节点的名称，
+          valueFrom: 
+            fieldRef:
+              fieldPath: metadata.name
+        - name: cluster.initial_master_nodes
+          value: "es-0,es-1,es-2"
+        - name: discovery.zen.minimum_master_nodes   #将其设置为(N/2) + 1，N是我们的群集中符合主节点的节点的数量。我们有3个 Elasticsearch 节点，因此我们将此值设置为2（向下舍入到最接近的整数）。
+          value: "2"
+        - name: discovery.seed_hosts #设置在 Elasticsearch 集群中节点相互连接的发现方法。
+          value: "elasticsearch"
+        - name: ES_JAVA_OPTS  #设置为-Xms512m -Xmx512m，告诉JVM使用512 MB的最小和最大堆。您应该根据群集的资源可用性和需求调整这些参数。
+          value: "-Xms512m -Xmx512m"
+        - name: network.host
+          value: "0.0.0.0"
+  volumeClaimTemplates:   #持久化模板
+  - metadata:
+      name: data 
+      labels:
+        app: elasticsearch
+    spec:
+      accessModes: [ "ReadWriteOnce" ] #只能被 mount 到单个节点上进行读写
+      storageClassName: nfs-client 
+      resources:
+        requests:
+          storage: 10Gi
+---
+kind: Service
+apiVersion: v1
+metadata:
+  name: elasticsearch
+  namespace: logging
+  labels:
+    app: elasticsearch
+spec:
+  selector:
+    app: elasticsearch
+  clusterIP: None
+  ports:
+    - port: 9200
+      name: rest
+    - port: 9300
+      name: inter-node
